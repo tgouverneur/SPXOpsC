@@ -1,0 +1,49 @@
+<?php
+/**
+ * SPXMsg object
+ *
+ * @author Gouverneur Thomas <tgo@espix.net>
+ * @copyright Copyright (c) 2014, Gouverneur Thomas
+ * @version 1.0
+ * @package objects
+ * @category classes
+ * @subpackage backend
+ * @filesource
+ */
+ class SPXMsg {
+   private $_bs = null; /* Byte stream */
+   private $_ebs = null; /* Encrypted byte stream */
+   private $_key = null;
+   private $_iv = null;
+   public $a_v = array();
+
+   public function __construct() {
+     global $config;
+     $this->_key = pack('H*', $config['key']);
+     $iv_size = mcrypt_get_iv_size(MCRYPT_RIJNDAEL_128, MCRYPT_MODE_CBC);
+     $this->_iv = mcrypt_create_iv($iv_size, MCRYPT_RAND);
+     $this->a_v['hostname'] = $config['agentname'];
+   }
+
+   private function _serialize() {
+     $this->_bs = serialize($this->a_v);
+     echo "[-] Serialized: ".$this->_bs."\n";
+     return 0;
+   }
+
+   private function _encrypt() {
+     if ($this->_bs) {
+       $this->_ebs = base64_encode($this->_iv.mcrypt_encrypt(MCRYPT_RIJNDAEL_128, $this->_key, $this->_bs, MCRYPT_MODE_CBC, $this->_iv));
+       echo "[-] EBS: ".$this->_ebs."\n";
+     }
+     return 1;
+   }
+
+   public function send($sock, $to, $port) {
+     $this->_serialize();
+     $this->_encrypt();
+     return socket_sendto($sock, $this->_ebs, strlen($this->_ebs), 0, $to, $port);
+   }
+ }
+
+?>

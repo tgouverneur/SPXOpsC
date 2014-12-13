@@ -1,0 +1,368 @@
+#!/usr/bin/php
+<?php
+ require_once(dirname(__FILE__)."/etc/config.inc.php");
+ require_once(dirname(__FILE__)."/libs/autoload.lib.php");
+ require_once(dirname(__FILE__)."/libs/daemon.obj.php");
+
+ class SPXOpsc implements Daemonizable {
+
+  private $_jexec = 0;
+  private $_interval = 1;
+  private $_logfd = 0;
+  private $_foreground = false;
+  private $_fct = null;
+  private $_crun = -1;
+  private $_lrun = -1;
+
+  public $pid = -1;
+  public $ppid = -1;
+  public $curProcess = 1;
+  public $f_master = 0;
+ 
+  public $_sock;
+  public $_to;
+  public $_port;
+
+  private $a_fct = array(
+                       'zpool_iostat' => null,
+                       'disk_iostat' => null,
+                   );
+
+  public function setForeground($f = false) {
+    $this->_foreground = $f;
+  }
+
+  public function log($str, $lvl = LLOG_INFO) {
+    $obj = null;
+    Logger::log($str, $obj, $lvl);
+  }
+
+  /* Main run () */
+  public function run() {
+
+    $this->log("Entering run()", LLOG_DEBUG);
+   
+    if ($this->_fct) {
+      $this->log("Running ".$this->_fct."()", LLOG_DEBUG);
+      $this->{$this->_fct}();
+      die();
+    }
+
+    /* update last run time */
+    $this->_lrun = $this->_crun;
+    $this->_crun = time();
+    $this->log("Previous run: ".$this->_lrun, LLOG_DEBUG);
+    $this->log("New run: ".$this->_crun, LLOG_DEBUG);
+    
+    /* Check for other eventually died pids or locks */
+    if ($this->f_master) {
+      /* check if we haven't yet started a pid for a specific function */
+      foreach($this->a_fct as $fct => $pid) {
+        if (!$pid) {
+          $this->a_fct[$fct] = $this->spawnProcess($fct);
+	  $this->log("Spawned $fct process: ".$this->a_fct[$fct], LLOG_DEBUG);
+        }
+      }
+      /* first, reap eventual dead childs */
+      $this->sigchld();
+      foreach($this->a_fct as $fct => $pid) {
+        if ($pid) $pid->checkMe($this);
+        if ($pid->f_dead) {
+          $this->a_fct[$fct] = null;
+        }
+      }
+    }
+    $this->log("sleeping..", LLOG_DEBUG);
+    sleep($this->_interval);
+//    pcntl_signal_dispatch();
+    return 0;
+  }
+
+  public function setNrProcess($i) {
+    $this->_nrProcess = $i;
+  }
+
+  public function setInterval($i) {
+    $this->_interval = $i;
+  }
+
+  public function start() {
+    global $config;
+    if (!$this->f_master && $this->ppid) {
+      $config['spxopsd']['log'] = $config['spxopsd']['log'].'-'.$this->pid;
+    }
+    if (!$this->_foreground) Logger::openLog();
+  }
+
+  public function cleanup() {
+    if (!$this->_foreground) Logger::closeLog();
+  }
+
+  /* Signal management */
+
+  public function sigchld() {
+    while(true) {
+       $p = pcntl_waitpid(-1, $status, WNOHANG);  
+       if($p > 0){ 
+         $this->log("We just reaped a child: $p", LLOG_WARN);
+       } else {
+         return;
+       }
+    }
+  }
+
+  public function sigterm() {
+    $this->cleanup();
+    die();
+  }
+
+  public function sighup() {
+    if (!$this->_foreground) Logger::openLog();
+    if (!$this->_foreground) Logger::closeLog();
+  }
+ 
+  public function sigkill() {
+    $this->cleanup();
+    die();
+  }
+
+  public function sigusr1() {
+  }
+
+  public function sigusr2() {
+  }
+
+  public function help() {
+    global $argv;
+    echo "$argv[0] [-hvf]\n";
+  }
+
+  /* Log management */
+  public function __construct($parent = null, $fct = '') {
+    $this->_fct = $fct;
+    if ($parent) {
+      $this->f_master = 0;
+      $this->ppid = $parent->pid;
+      $this->setForeground(false);
+      $this->_interval = $parent->getInterval();
+    } else {
+      $j = new Job();
+      unset($j);
+    }
+  }
+
+  private function spawnProcess($fct) {
+    global $config;
+    $newD = new SPXOpsc($this, $fct);
+    $daemon = new Daemon($newD, false);
+    $pid = new Pid();
+    $pid->agent = $config['agentname'];
+    $pid->pid = $daemon->getPid();
+    $pid->ppid = $this->pid;
+    $pid->f_master = 0;
+    return $pid;
+  }
+  public function getInterval() { return $this->_interval; }
+
+  private function disk_iostat() {
+    global $config;
+
+    $this->_sock = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+    $this->_to = gethostbyname($config['server']['host']);
+    $this->_port = $config['server']['port'];
+
+    while(1) { /* loop forever */
+      $descriptorspec = array(
+         0 => array("pipe", "r"),
+         1 => array("pipe", "w"),
+         2 => array("file", "/dev/null", "a")
+      );
+
+      $cwd = '/tmp';
+      $env = array();
+
+      $process = proc_open('/usr/bin/iostat -xnr -T u 1', $descriptorspec, $pipes, $cwd, $env);
+
+      if (is_resource($process)) {
+
+          fclose($pipes[0]);
+
+          $time = 0;
+          $av = null;
+          $notfirst = 0;
+	  $skipfirst = 1;
+          while($line = stream_get_line($pipes[1], 100, "\n")) {
+            $line = trim($line);
+            if (preg_match('/^[0-9]*$/', $line)) {
+              $time = $line;
+              if ($notfirst) {
+		if ($skipfirst) {
+		  $skipfirst--;
+		  continue;
+		}
+                $msg = new SPXMsg();
+                $msg->a_v = $av;
+                $msg->send($this->_sock, $this->_to, $this->_port);
+              }
+              if (!$av) {
+                $av = array();
+                $notfirst = 1;
+              }
+              $av['ts'] = $time;
+              $av['type'] = 'iostat';
+              $av['values'] = array();
+            }
+            if (preg_match('/^([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([a-zA-Z0-9]*)$/', $line, $f)) {
+              $dn = $f[11];
+              $dv = array(
+                       'riops' => $f[1],
+                       'wiops' => $f[2],
+                       'krs' => $f[3],
+                       'kws' => $f[4],
+                       'wait' => $f[5],
+                       'actv' => $f[6],
+                       'wsvc' => $f[7],
+                       'asvc' => $f[8],
+                       'wpc' => $f[9],
+                       'bpc' => $f[10],
+                 );
+               $av['values'][$dn] = $dv;
+               if (count($av['values']) >= 100) { /* split msg every 100 entries */
+                 $tmp = new SPXMsg();
+	         $tmp->a_v = $av;
+                 $tmp->send($this->_sock, $this->_to, $this->_port);
+	         $av['values'] = array();
+	       }
+            }
+          }
+          fclose($pipes[1]);
+          $return_value = proc_close($process);
+      }
+    }
+  }
+
+
+  private function zpool_iostat() {
+    global $config;
+
+    $this->_sock = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+    $this->_to = gethostbyname($config['server']['host']);
+    $this->_port = $config['server']['port'];
+
+    while(1) { /* loop forever */
+      $descriptorspec = array(
+         0 => array("pipe", "r"),
+         1 => array("pipe", "w"),
+         2 => array("file", "/dev/null", "a")
+      );
+
+      $cwd = '/tmp';
+      $env = array();
+
+      $process = proc_open('/usr/sbin/zpool iostat -T u 1', $descriptorspec, $pipes, $cwd, $env);
+
+      if (is_resource($process)) {
+
+          fclose($pipes[0]);
+          $time = 0;
+          $av = null;
+          $skipfirst = 1;
+          $stepPool = false;
+/*
+$ zpool iostat -T u 1
+1418069689
+               capacity     operations    bandwidth
+pool        alloc   free   read  write   read  write
+----------  -----  -----  -----  -----  -----  -----
+rpool       17.0G  2.87G      0      0  6.09K  4.45K
+tank        9.39T  1.49T     30     50  1.50M  1.59M
+----------  -----  -----  -----  -----  -----  -----
+1418069690
+rpool       17.0G  2.87G      0      0      0      0
+tank        9.39T  1.49T    132    747  13.4M  12.4M
+----------  -----  -----  -----  -----  -----  -----
+*/
+          while($line = stream_get_line($pipes[1], 100, "\n")) {
+            $line = trim($line);
+            if (preg_match('/^[0-9]*$/', $line)) {
+	      if ($skipfirst) {
+		$skipfirst--;
+		continue;
+	      }
+              if ($stepPool) { /* some solaris release doesn't put the -------- line */
+                $stepPool = false;
+                $msg = new SPXMsg();
+                $msg->a_v = $av;
+                $msg->a_v['ts'] = $time;
+                $msg->a_v['type'] = 'ziostat';
+                $msg->send($this->_sock, $this->_to, $this->_port);
+                $stepPool = false;
+              }
+              $time = $line;
+              $stepPool = true;
+	      $av = array();
+	      $this->log("found time $time", LLOG_DEBUG);
+            }
+            if (!$stepPool && preg_match('/^----------/', $line)) {
+	      continue;
+	    }
+            if ($stepPool && preg_match('/^----------/', $line)) {
+	      $stepPool = false;
+	      $msg = new SPXMsg();
+	      $msg->a_v = $av;
+              $msg->a_v['ts'] = $time;
+              $msg->a_v['type'] = 'ziostat';
+              $msg->send($this->_sock, $this->_to, $this->_port);
+	      $stepPool = false;
+	      continue;
+            }
+            if ($stepPool && preg_match('/^([a-zA-Z0-9\-\.:,]+)\s+([^\s]*)\s+([^\s]*)\s+([^\s]*)\s+([^\s]*)\s+([^\s]*)\s+([^\s]*)$/', $line, $f)) {
+              $dn = $f[1];
+	      $dv = array(
+			'rops' => Pool::formatSize($f[4]),
+			'wops' => Pool::formatSize($f[5]),
+			'rb' => Pool::formatSize($f[6]),
+			'wb' => Pool::formatSize($f[7]),
+			);
+              $av['values'][$dn] = $dv;
+            }
+          }
+          fclose($pipes[1]);
+          $return_value = proc_close($process);
+      }
+    }
+  }
+
+ }
+
+ $m = mysqlCM::getInstance();
+
+ $spxopsc = new SPXOpsc();
+
+ $opts = "vhf";
+ $options = getopt($opts);
+
+ if (isset($options["h"])) {
+  $spxopsc->help();
+  exit(0);
+ }
+
+ if (isset($options["v"])) {
+   Logger::logLevel(LLOG_DEBUG);
+ }
+
+ if (isset($options["f"])) {
+  $o['f'] = true;
+ } else {
+  $o['f'] = false;
+ }
+
+ $spxopsc->setForeground($o['f']);
+ $spxopsc->setInterval(5);
+ $spxopsc->f_master = 1;
+
+ $m->disconnect();
+
+ $daemon = new Daemon($spxopsc, $o['f']);  
+
+?>

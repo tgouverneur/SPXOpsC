@@ -1,0 +1,31 @@
+<?php
+/**
+ * File used to store application settings
+ * @author Gouverneur Thomas <tgo@espix.net>
+ * @copyright Copyright (c) 2007-2012, Gouverneur Thomas
+ * @version 1.0
+ * @package includes
+ * @subpackage config
+ * @category config
+ */
+
+$config['rootpath'] = '/home/wildcat/dev/spxopsc';
+$config['agentname'] = 'nas02.ach.espix.org';
+
+$config['server']['key'] = '157d7c000573526a30991bff2ad6b8ee157d7c000573526a30991bff2ad6b8ee';
+
+$config['server']['host'] = 'spxops.ach.espix.org';
+$config['server']['port'] = 2142;
+
+/* Logging */
+$config['spxopsd']['log'] = $config['rootpath'].'/logs/spxopsc.log';
+@require_once($config['rootpath'].'/libs/logger.obj.php');
+Logger::logLevel(LLOG_ERR);
+Logger::logLevel(LLOG_WARN);
+Logger::logLevel(LLOG_INFO);
+
+/* deps */
+$config['mysql'] = null;
+
+date_default_timezone_set('UTC');
+?>
