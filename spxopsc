@@ -164,6 +164,94 @@
   }
   public function getInterval() { return $this->_interval; }
 
+  private function cpu_mpstat() {
+    global $config;
+
+    $this->_sock = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+    $this->_to = gethostbyname($config['server']['host']);
+    $this->_port = $config['server']['port'];
+
+    while(1) { /* loop forever */
+      $descriptorspec = array(
+         0 => array("pipe", "r"),
+         1 => array("pipe", "w"),
+         2 => array("file", "/dev/null", "a")
+      );
+
+      $cwd = '/tmp';
+      $env = array();
+/*
+1418432174
+ BIN minf mjf xcal  intr ithr  csw icsw migr smtx  srw syscl  usr sys  st idl sze
+   0 1854   0    0  1365  740 12682   30  866  137    0 62927   89  38   0 1073  12
+1418432175
+ BIN minf mjf xcal  intr ithr  csw icsw migr smtx  srw syscl  usr sys  st idl sze
+   0  793   0    0  1399  798 7217   11   83  133    0 31071   50  24   0 1126  12
+^C
+spxops@slc-smgt1:/tank/app/spxopsc$ mpstat -A 1 -T u -q -p 1
+*/
+
+      $process = proc_open('/usr/bin/mpstat -A 1 -T u 1', $descriptorspec, $pipes, $cwd, $env);
+
+      if (is_resource($process)) {
+
+          fclose($pipes[0]);
+
+          $time = 0;
+          $av = null;
+          $notfirst = 0;
+	  $skipfirst = 1;
+          while($line = stream_get_line($pipes[1], 100, "\n")) {
+            $line = trim($line);
+            if (preg_match('/^[0-9]*$/', $line)) {
+              $time = $line;
+              if ($notfirst) {
+		if ($skipfirst) {
+		  $skipfirst--;
+		  continue;
+		}
+                $msg = new SPXMsg();
+                $msg->a_v = $av;
+                $msg->send($this->_sock, $this->_to, $this->_port);
+              }
+              if (!$av) {
+                $av = array();
+                $notfirst = 1;
+              }
+              $av['ts'] = $time;
+              $av['type'] = 'iostat';
+              $av['values'] = array();
+            }
+            if (preg_match('/^([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([a-zA-Z0-9]*)$/', $line, $f)) {
+              $dn = $f[11];
+              $dv = array(
+                       'riops' => $f[1],
+                       'wiops' => $f[2],
+                       'krs' => $f[3],
+                       'kws' => $f[4],
+                       'wait' => $f[5],
+                       'actv' => $f[6],
+                       'wsvc' => $f[7],
+                       'asvc' => $f[8],
+                       'wpc' => $f[9],
+                       'bpc' => $f[10],
+                 );
+               $av['values'][$dn] = $dv;
+               if (count($av['values']) >= 100) { /* split msg every 100 entries */
+                 $tmp = new SPXMsg();
+	         $tmp->a_v = $av;
+                 $tmp->send($this->_sock, $this->_to, $this->_port);
+	         $av['values'] = array();
+	       }
+            }
+          }
+          fclose($pipes[1]);
+          $return_value = proc_close($process);
+      }
+    }
+  }
+
+
   private function disk_iostat() {
     global $config;
 
