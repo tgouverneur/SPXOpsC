@@ -24,6 +24,7 @@
   public $_port;
 
   private $a_fct = array(
+                       'cpu_mpstat' => null,
                        'zpool_iostat' => null,
                        'disk_iostat' => null,
                    );
@@ -222,27 +223,27 @@ spxops@slc-smgt1:/tank/app/spxopsc$ mpstat -A 1 -T u -q -p 1
               $av['type'] = 'iostat';
               $av['values'] = array();
             }
-            if (preg_match('/^([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([0-9\.]*),([a-zA-Z0-9]*)$/', $line, $f)) {
+            if (preg_match('/^([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)$/', $line, $f)) {
               $dn = $f[11];
               $dv = array(
-                       'riops' => $f[1],
-                       'wiops' => $f[2],
-                       'krs' => $f[3],
-                       'kws' => $f[4],
-                       'wait' => $f[5],
-                       'actv' => $f[6],
-                       'wsvc' => $f[7],
-                       'asvc' => $f[8],
-                       'wpc' => $f[9],
-                       'bpc' => $f[10],
+                       'minf' => $f[2],
+                       'mjf' => $f[3],
+                       'xcal' => $f[4],
+                       'intr' => $f[5],
+                       'ithr' => $f[6],
+                       'csw' => $f[7],
+                       'icsw' => $f[8],
+                       'migr' => $f[9],
+                       'smtx' => $f[10],
+                       'srw' => $f[11],
+                       'syscl' => $f[12],
+                       'usr' => $f[13],
+                       'sys' => $f[14],
+                       'st' => $f[15],
+                       'idl' => $f[16],
+                       'sze' => $f[17],
                  );
-               $av['values'][$dn] = $dv;
-               if (count($av['values']) >= 100) { /* split msg every 100 entries */
-                 $tmp = new SPXMsg();
-	         $tmp->a_v = $av;
-                 $tmp->send($this->_sock, $this->_to, $this->_port);
-	         $av['values'] = array();
-	       }
+               $av['values'] = $dv;
             }
           }
           fclose($pipes[1]);
